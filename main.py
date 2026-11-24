@@ -4,7 +4,8 @@ from datetime import datetime, timezone
 from typing import Any
 from threading import Lock
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -26,6 +27,9 @@ app = FastAPI(
     description="Authenticated, role-based knowledge assistant for PulseOps.",
     version="1.0.0",
 )
+
+# Swagger UI Bearer authentication
+bearer_scheme = HTTPBearer(auto_error=False)
 
 
 # Development configuration.
@@ -61,28 +65,26 @@ class RetrievalRequest(BaseModel):
 # AUTHENTICATION HELPERS
 # ============================================================
 
-def get_bearer_token(authorization: str | None) -> str:
-    """Extract the existing Supabase access token from Authorization."""
+def get_bearer_token(
+    credentials: HTTPAuthorizationCredentials | None,
+) -> str:
+    """Extract the Supabase access token from Bearer credentials."""
 
-    if not authorization:
+    if not credentials or credentials.scheme.lower() != "bearer":
         raise HTTPException(
             status_code=401,
             detail="Authentication required. Please sign in again.",
         )
 
-    scheme, separator, token = authorization.partition(" ")
+    token = credentials.credentials.strip()
 
-    if (
-        not separator
-        or scheme.lower() != "bearer"
-        or not token.strip()
-    ):
+    if not token:
         raise HTTPException(
             status_code=401,
             detail="Invalid authorization header.",
         )
 
-    return token.strip()
+    return token
 
 
 def get_approved_user(
@@ -94,12 +96,12 @@ def get_approved_user(
 
     The role is never accepted from the frontend.
     """
-
+    stage = "Supabase Auth verification"
     try:
         supabase_client, auth_user = verify_user_token(
             access_token
         )
-
+        stage = "Application user profile lookup"
         profile_response = (
             supabase_client.table("users")
             .select("id, role, approval_status")
@@ -144,14 +146,22 @@ def get_approved_user(
     except HTTPException:
         raise
 
-    except Exception:
-        # Do not expose tokens, database details, or internal errors.
+    except Exception as error:
+        error_message = getattr(error, "message", str(error))
+        error_code = getattr(error, "code", None)
+        error_status = getattr(error, "status", None)
+
+        print(
+            f"Authentication diagnostic: {stage} failed "
+            f"({type(error).__name__}) | "
+            f"code={error_code} | "
+            f"status={error_status} | "
+            f"message={error_message}"
+        )
+
         raise HTTPException(
             status_code=401,
-            detail=(
-                "Authentication could not be verified. "
-                "Please sign in again."
-            ),
+            detail="Authentication could not be verified. Please sign in again.",
         )
 
 
@@ -224,7 +234,7 @@ def health():
 @app.post("/chat")
 def chat(
     request: ChatRequest,
-    authorization: str | None = Header(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ):
     """
     Authenticated chatbot endpoint.
@@ -243,7 +253,7 @@ def chat(
             detail="Please enter a question.",
         )
 
-    access_token = get_bearer_token(authorization)
+    access_token = get_bearer_token(credentials)
 
     supabase_client, auth_user, role = get_approved_user(
         access_token
@@ -308,7 +318,7 @@ def chat(
 @app.post("/retrieve")
 def retrieve(
     request: RetrievalRequest,
-    authorization: str | None = Header(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ):
     """
     Retrieve role-authorized PDF context for the existing
@@ -326,7 +336,7 @@ def retrieve(
             detail="Please enter a question.",
         )
 
-    access_token = get_bearer_token(authorization)
+    access_token = get_bearer_token(credentials)
 
     supabase_client, auth_user, role = get_approved_user(
         access_token
@@ -386,7 +396,7 @@ def retrieve(
 
 @app.post("/admin/ingest")
 def admin_ingest(
-    authorization: str | None = Header(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
 ):
     """
     Ingest the seven PDFs using the existing approved Admin session.
@@ -395,7 +405,7 @@ def admin_ingest(
     Existing documents are not blindly inserted again.
     """
 
-    access_token = get_bearer_token(authorization)
+    access_token = get_bearer_token(credentials)
 
     # Verify the existing website user.
     supabase_client, auth_user, role = get_approved_user(
