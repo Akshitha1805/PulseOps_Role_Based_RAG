@@ -5,7 +5,8 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 
 from langchain_groq import ChatGroq
-from langchain_huggingface import HuggingFaceEmbeddings
+import threading
+from langchain_core.embeddings import Embeddings
 
 
 # --------------------------------------------------
@@ -97,12 +98,50 @@ def verify_user_token(access_token: str):
 
 
 # --------------------------------------------------
-# EMBEDDINGS
+# EMBEDDINGS — LAZY-LOADED FASTEMBED / ONNX
 # --------------------------------------------------
 
-embeddings = HuggingFaceEmbeddings(
-    model_name="sentence-transformers/all-MiniLM-L6-v2"
-)
+class LazyFastEmbedEmbeddings(Embeddings):
+    """
+    Load the existing MiniLM embedding model only when
+    document or query embeddings are first requested.
+
+    This avoids loading the model during FastAPI startup.
+    """
+
+    def __init__(self):
+        self._model = None
+        self._model_lock = threading.Lock()
+
+    def _get_model(self):
+        if self._model is None:
+            with self._model_lock:
+                if self._model is None:
+                    from langchain_community.embeddings import (
+                        FastEmbedEmbeddings
+                    )
+
+                    self._model = FastEmbedEmbeddings(
+                        model_name=(
+                            "sentence-transformers/all-MiniLM-L6-v2"
+                        ),
+                        threads=1,
+                        batch_size=16,
+                        parallel=None,
+                    )
+
+                    print("FastEmbed MiniLM model loaded.")
+
+        return self._model
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._get_model().embed_documents(texts)
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._get_model().embed_query(text)
+
+
+embeddings = LazyFastEmbedEmbeddings()
 
 
 # --------------------------------------------------
